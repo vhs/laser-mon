@@ -1,0 +1,6 @@
+/include/wifi_creds.hpp
+/Release*
+*.d
+*.o
+*.swp
+*~
