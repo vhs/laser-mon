@@ -120,9 +120,9 @@ int InitializeSpiffs()
   {
     String msg = "Formatted: ";
     msg = msg + String(bFormatted);
-    msg = msg + String(" initialzed: ");
+    msg = msg + String(" initialized: ");
     msg = msg + String(bSpiffsInit);
-    Serial.println("Could not initialze spiffs");
+    Serial.println("Could not initialize SPIFFS");
     Serial.println(msg);
   }
   return (bFormatted && bSpiffsInit) ? 0 : -1;
