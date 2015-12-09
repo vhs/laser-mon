@@ -6,6 +6,8 @@
 #include <Config.hpp>
 #include <DataSamples.hpp>
 #include <FS.h>
+#include <ArduinoJson.h>
+#include <limits.h>
 
 // Define these in the wifi_creds.hpp file
 //const char ssid[] = "YOUR SSID"
@@ -21,6 +23,8 @@ ConfigurationManager g_configMgr;
 
 ESP8266WebServer server(80);
 MicrosecondTicker usTicker;
+
+unsigned long g_lastMillisUpdate;
 
 //###### Static functions ########/
 
@@ -74,11 +78,48 @@ void handlePostConfig()
 		cfg.urlForUpdate = urlForUpdate;
 }
 
+void handleGetSamples()
+{
+	g_dataSampler.Reset();
+	SampleData sampleData = g_dataSampler.GetData();
+
+	// jsonify it!
+	ArduinoJson::StaticJsonBuffer<256> jsonBuf;
+	ArduinoJson::JsonObject& obj = jsonBuf.createObject();
+
+	obj["num_samples"] = sampleData.numMeasurements;
+
+	// Get
+	obj["avg_pwr"] = (100 * sampleData.numPwmPinHigh) / (float)sampleData.numMeasurements;
+
+	// TTL is active low
+	obj["avg_on"] = (100 * (sampleData.numMeasurements - sampleData.numTtlPinHigh)) / (float)sampleData.numMeasurements;
+
+	unsigned long sampleTime;
+	unsigned long currentTime = millis();
+	if (currentTime < g_lastMillisUpdate)
+	{
+		// We rolled over, figure out the amount of roll over
+		sampleTime = currentTime + ULONG_MAX - g_lastMillisUpdate;
+	}
+	else
+	{
+		sampleTime = currentTime - g_lastMillisUpdate;
+	}
+	g_lastMillisUpdate = millis();
+	obj["sample_time_ms"] = sampleTime;
+
+	String str;
+	obj.printTo(str);
+	server.send(200, "application/json", str);
+}
+
 void SetupWebServer()
 {
   server.on("/", handleRoot);
   server.on("/Config", HTTP_GET, handleGetConfig);
   server.on("/Config", HTTP_POST, handlePostConfig);
+  server.on("/Samples", HTTP_POST, handleGetSamples);
 
   server.begin();
   Serial.println("HTTP server started");
