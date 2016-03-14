@@ -1,81 +1,69 @@
+#define MQTT_MAX_PACKET_SIZE 256
+
 #include <ESP8266WiFi.h>
-#include <WiFiClient.h>
-#include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
+#include <WiFiClient.h>
+#include <PubSubClient.h>
+#include <PubSubClient.h>
+
 #include <MicrosecondTicker.h>
-#include <Config.hpp>
+
 #include <DataSamples.hpp>
-#include <FS.h>
 #include <ArduinoJson.h>
 #include <limits.h>
+
 
 // Define these in the wifi_creds.hpp file
 //const char ssid[] = "YOUR SSID"
 //const char wifi_passwd[] = "YOUR WIFI PASSWORD"
 #include <wifi_creds.hpp>
 
-#define PWM_PIN 4
-#define TTL_PIN 1
+#define PWM_PIN D0
+#define TTL_PIN D1
 
 //###### Global Data #######//
 DataSampler g_dataSampler;
-ConfigurationManager g_configMgr;
 
-ESP8266WebServer server(80);
 MicrosecondTicker usTicker;
+
+WiFiClient client;
+
+static const char* k_mqttbroker = "172.16.0.161";
+PubSubClient g_pubSubClient(client);
+
 
 unsigned long g_lastMillisUpdate;
 
+#define MQTT_TOPIC "cook/laser/power"
+
 //###### Static functions ########/
-
-void SetRandomSeed()
-{
-    uint32_t seed;
-
-    // random works best with a seed that can use 31 bits
-    // analogRead on a unconnected pin tends toward less than four bits
-    seed = analogRead(0);
-    delay(1);
-
-    for (int shifts = 3; shifts < 31; shifts += 3)
-    {
-        seed ^= analogRead(0) << shifts;
-        delay(1);
-    }
-
-    // Serial.println(seed);
-    randomSeed(seed);
-}
 
 void DoSample(void*)
 {
   g_dataSampler.DoSample(PWM_PIN, TTL_PIN);
   // Come up with another random value and reschedule ourself
-  usTicker.attach_us(random(20,800), &DoSample, NULL, true);
+  usTicker.attach_us(800, &DoSample, NULL, true);
 }
 
-void handleRoot()
-{
-  //server.send(200, "text/plain", String(cnt));
-}
-
-void handleGetConfig() {
-	String str;
-	ConfigurationParams cfg = g_configMgr.Get();
-	ConfigRepresentationFactory::AsJson(cfg, str);
-	server.send(200, "application/json", str);
-}
-
-void handlePostConfig()
-{
-	long secondsPerUpdate = server.arg("secondsPerUpdate").toInt();
-	String urlForUpdate = server.arg("urlForUpdate");
-
-	ConfigurationParams cfg = g_configMgr.Get();
-	if (secondsPerUpdate)
-		cfg.secondsPerUpdate = secondsPerUpdate;
-	if (urlForUpdate.length())
-		cfg.urlForUpdate = urlForUpdate;
+void reconnect() {
+  // Loop until we're reconnected
+  while (!g_pubSubClient.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    // Attempt to connect
+    if (g_pubSubClient.connect("Laser Power Monitor")) {
+      Serial.println("connected");
+      // Once connected, publish an announcement...
+      //g_pubSubClient.publish("outTopic", "hello world");
+      // ... and resubscribe
+      //g_pubSubClient.subscribe("inTopic");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(g_pubSubClient.state());
+      Serial.println(" try again in 5 seconds");
+      // Wait 5 seconds before retrying
+      delay(5000);
+    }
+  }
 }
 
 void handleGetSamples()
@@ -95,6 +83,9 @@ void handleGetSamples()
 	// TTL is active low
 	obj["avg_on"] = (100 * (sampleData.numMeasurements - sampleData.numTtlPinHigh)) / (float)sampleData.numMeasurements;
 
+	//obj["numTtlPinHigh"] = sampleData.numTtlPinHigh;
+	//obj["numPwmPinHigh"] = sampleData.numPwmPinHigh;
+
 	unsigned long sampleTime;
 	unsigned long currentTime = millis();
 	if (currentTime < g_lastMillisUpdate)
@@ -109,21 +100,23 @@ void handleGetSamples()
 	g_lastMillisUpdate = millis();
 	obj["sample_time_ms"] = sampleTime;
 
+	reconnect();
+
 	String str;
 	obj.printTo(str);
-	server.send(200, "application/json", str);
+	//Serial.print("Publishing: ");
+	Serial.println(str);
+
+	bool ret = g_pubSubClient.publish(MQTT_TOPIC, str.c_str());
+	if (!ret)
+	{
+		Serial.println("Failed to publish");
+	}
+	//server.send(200, "application/json", str);
 }
 
-void SetupWebServer()
-{
-  server.on("/", handleRoot);
-  server.on("/Config", HTTP_GET, handleGetConfig);
-  server.on("/Config", HTTP_POST, handlePostConfig);
-  server.on("/Samples", HTTP_POST, handleGetSamples);
 
-  server.begin();
-  Serial.println("HTTP server started");
-}
+
 
 void DoWifiConnect()
 {
@@ -144,64 +137,32 @@ void DoWifiConnect()
 
 void StartSampling()
 {
+  Serial.println("StartSampling()");
   usTicker.attach_us(500, &DoSample, NULL, true);
 }
 
-int InitializeSpiffs()
-{
-  bool bFormatted = true;
-  bool bSpiffsInit = SPIFFS.begin();
-  if (!bSpiffsInit)
-  {
-    Serial.println("Reformatting spiffs");
-    bFormatted = SPIFFS.format();
-    bSpiffsInit = SPIFFS.begin();
-  }
-  if (!bFormatted)
-  {
-    String msg = "Formatted: ";
-    msg = msg + String(bFormatted);
-    msg = msg + String(" initialized: ");
-    msg = msg + String(bSpiffsInit);
-    Serial.println("Could not initialize SPIFFS");
-    Serial.println(msg);
-  }
-  return (bFormatted && bSpiffsInit) ? 0 : -1;
-}
-
 void setup(void){
-  bool bErrorOnSetup = false;
-  int ret = 0;
 
-  SetRandomSeed();
   Serial.begin(115200);
 
   DoWifiConnect();
 
-  SetupWebServer();
+  g_pubSubClient.setServer(k_mqttbroker,1883);
 
-  ret = InitializeSpiffs();
-  if (ret < 0)
-  {
-	  Serial.println("ERROR: initializing SPIFFS");
-	  bErrorOnSetup = true;
-  }
+  reconnect();
 
-  ret = g_configMgr.Load();
-  if (ret < 0)
-  {
-	  Serial.println("ERROR: loading configuration");
-	  bErrorOnSetup = true;
-  }
+  StartSampling();
 
-  if (!bErrorOnSetup)
-  {
-	  StartSampling();
-  }
 }
 
-void loop(void){
-  server.handleClient();
+void loop(void)
+{
+	delay(1000);
+	handleGetSamples();
+	//if (!g_pubSubClient.connected())
+	//{
+	//  reconnect();
+	//}
 
 }
 
